@@ -1,0 +1,512 @@
+import React, { useState, useEffect, useRef } from "react";
+
+
+// Multiplayer Word Games - Single-file React app
+// - Host creates a room (room code)
+// - Host cannot play (host controls rounds, words, teams)
+// - Players join by entering room code and group name
+// - Support for Hangman (le pendu), Anagram and Word Search (chasse au mot)
+// - Local-only (no backend). Meant for classroom use on a single shared device or local network.
+
+
+export default function App() {
+// === room & host state ===
+const [roomCode, setRoomCode] = useState("");
+const [isHost, setIsHost] = useState(false);
+const [rooms, setRooms] = useState({}); // store rooms locally: {code: {host, groups, settings, gameState}}
+const [currentRoom, setCurrentRoom] = useState(null);
+
+
+// UI helpers
+const [view, setView] = useState("lobby"); // lobby | create | join | room
+
+
+// === create room ===
+const createRoom = ({ hostName }) => {
+const code = generateRoomCode();
+const newRoom = {
+code,
+hostName: hostName || "Host",
+groups: {}, // {groupId: {name, members: []}}
+settings: {
+gameType: "hangman", // hangman | anagram | wordsearch
+rounds: 5,
+allowGuessesFromHost: false,
+},
+history: [],
+gameState: null, // in-game state
+};
+const next = { ...rooms, [code]: newRoom };
+setRooms(next);
+setRoomCode(code);
+setCurrentRoom(newRoom);
+setIsHost(true);
+setView("room");
+};
+
+
+// === join room / create group ===
+const joinRoomAsGroup = (code, groupName) => {
+if (!rooms[code]) return { ok: false, message: "Room not found" };
+const room = { ...rooms[code] };
+const id = generateId();
+room.groups[id] = { id, name: groupName, members: [], score: 0 };
+const next = { ...rooms, [code]: room };
+setRooms(next);
+setRoomCode(code);
+setCurrentRoom(room);
+setIsHost(false);
+setView("room");
+return { ok: true, groupId: id };
+};
+
+
+// === host actions: start round, set word, reveal, evaluate guess ===
+const startRound = (code, word, options = {}) => {
+const room = { ...rooms[code] };
+if (!room) return;
+const gameType = room.settings.gameType;
+let gameState = null;
+if (gameType === "hangman") {
+gameState = createHangmanState(word);
+} else if (gameType === "anagram") {
+gameState = createAnagramState(word);
+} else if (gameType === "wordsearch") {
+gameState = createWordSearchState(word);
+}
+room.gameState = { ...gameState, active: true, startedAt: Date.now(), hostWord: word };
+const next = { ...rooms, [code]: room };
+setRooms(next);
+setCurrentRoom(room);
+};
+
+
+const endRound = (code) => {
+const room = { ...rooms[code] };
+if (!room) return;
+room.gameState = null;
+const next = { ...rooms, [code]: room };
+setRooms(next);
+setCurrentRoom(room);
+};
+
+
+const submitGuess = (code, groupId, guess) => {
+const room = { ...rooms[code] };
+if (!room || !room.gameState) return { ok: false };
+const gs = room.gameState;
+if (room.settings.gameType === "hangman") {
+const res = hangmanGuess(gs, guess);
+// award points if word solved
+if (res.solved) {
+room.groups[groupId].score += 10; // example
+room.history.push({ type: "round-win", groupId, word: gs.word });
+room.gameState = null;
+} else {
+room.gameState = gs;
+}
+const next = { ...rooms, [code]: room };
+setRooms(next);
+setCurrentRoom(room);
+return res;
+}
+if (room.settings.gameType === "anagram") {
+const res = anagramGuess(gs, guess);
+if (res.correct) {
+room.groups[groupId].score += 10;
+room.history.push({ type: "round-win", groupId, word: gs.solution });
+room.gameState = null;
+} else {
+room.gameState = gs;
+}
+const next = { ...rooms, [code]: room };
+setRooms(next);
+setCurrentRoom(room);
+return res;
+}
+if (room.settings.gameType === "wordsearch") {
+const res = wordsearchGuess(gs, guess);
+if (res.found) {
+room.groups[groupId].score += 10;
+room.history.push({ type: "round-win", groupId, word: guess });
+room.gameState = null;
+}
+room.gameState = gs;
+const next = { ...rooms, [code]: room };
+setRooms(next);
+setCurrentRoom(room);
+return res;
+}
+return { ok: false };
+};
+
+
+// === helper game logic ===
+function createHangmanState(word) {
+const normalized = word.toLowerCase();
+const revealed = normalized.replace(/[a-zA-Z]/g, "_");
+return { type: "hangman", word: normalized, revealed: revealed.split(""), mistakes: 0, maxMistakes: 6, attempted: [] };
+}
+function hangmanGuess(state, letter) {
+letter = letter.toLowerCase();
+if (state.attempted.includes(letter)) return { ok: false, message: "Déjà essayé" };
+state.attempted.push(letter);
+let hit = false;
+for (let i = 0; i < state.word.length; i++) {
+if (state.word[i] === letter) {
+state.revealed[i] = letter;
+hit = true;
+}
+}
+if (!hit) state.mistakes += 1;
+const solved = state.revealed.join("") === state.word;
+const lost = state.mistakes >= state.maxMistakes;
+return { ok: true, hit, solved, lost, state };
+}
+
+
+function createAnagramState(word) {
+const solution = word.toLowerCase().replace(/ /g, "");
+const shuffled = shuffleString(solution);
+return { type: "anagram", solution, scrambled: shuffled, attempts: [] };
+}
+function anagramGuess(state, guess) {
+guess = guess.toLowerCase().replace(/ /g, "");
+const correct = guess === state.solution;
+state.attempts.push({ guess, correct });
+return { ok: true, correct, attempts: state.attempts };
+}
+
+
+function createWordSearchState(word) {
+// Very simple: we treat wordsearch as "find the word" in a small generated grid
+const solution = word.toLowerCase().replace(/ /g, "");
+const grid = generateSimpleGrid(solution);
+return { type: "wordsearch", solution, grid, found: false };
+}
+function wordsearchGuess(state, guess) {
+if (guess.toLowerCase().replace(/ /g, "") === state.solution) {
+state.found = true;
+return { ok: true, found: true };
+}
+return { ok: true, found: false };
+}
+
+
+// === small util functions ===
+function generateRoomCode() {
+const letters = "ABCDEFGHJKMNPRSTUVWXYZ"; // avoid confusing chars
+let s = "";
+for (let i = 0; i < 6; i++) s += letters[Math.floor(Math.random() * letters.length)];
+return s;
+}
+function generateId() {
+return Math.random().toString(36).slice(2, 9);
+}
+function shuffleString(s) {
+const a = s.split("");
+for (let i = a.length - 1; i > 0; i--) {
+const j = Math.floor(Math.random() * (i + 1));
+[a[i], a[j]] = [a[j], a[i]];
+}
+return a.join("");
+}
+
+
+function generateSimpleGrid(word) {
+// Place the word horizontally in a 8x8 grid at a random row and column
+const size = 8;
+const grid = Array.from({ length: size }, () => Array.from({ length: size }, () => randomLetter()));
+const row = Math.floor(Math.random() * size);
+const col = Math.floor(Math.random() * (size - word.length + 1));
+for (let i = 0; i < word.length; i++) grid[row][col + i] = word[i];
+return grid;
+}
+function randomLetter() {
+const letters = "abcdefghijklmnopqrstuvwxyz";
+return letters[Math.floor(Math.random() * letters.length)];
+}
+
+
+// === simple UI ===
+return (
+
+
+
+
+
+
+Multiplayer Word Games — Hostable
+
+
+Room: {roomCode || "Aucune"}
+
+
+
+
+
+    <main className="mt-6">
+      {view === "lobby" && (
+        <div className="grid grid-cols-2 gap-4">
+          <div className="p-4 border rounded">
+            <h2 className="font-semibold">Créer une salle (host)</h2>
+            <CreateRoomForm onCreate={createRoom} />
+          </div>
+          <div className="p-4 border rounded">
+            <h2 className="font-semibold">Rejoindre une salle (groupe)</h2>
+            <JoinRoomForm onJoin={joinRoomAsGroup} rooms={rooms} />
+          </div>
+        </div>
+      )}
+
+      {view === "room" && currentRoom && (
+        <RoomView
+          room={currentRoom}
+          isHost={isHost}
+          onStartRound={startRound}
+          onEndRound={endRound}
+          onSubmitGuess={submitGuess}
+          updateRoom={(r) => {
+            setRooms({ ...rooms, [r.code]: r });
+            setCurrentRoom(r);
+          }}
+        />
+      )}
+
+      <div className="mt-6">
+        <button
+          className="px-3 py-2 bg-indigo-600 text-white rounded"
+          onClick={() => setView(view === "lobby" ? "room" : "lobby")}
+        >
+          Basculer vue
+        </button>
+      </div>
+    </main>
+  </div>
+</div>
+
+
+
+);
+}
+
+
+function CreateRoomForm({ onCreate }) {
+const [hostName, setHostName] = useState("");
+return (
+
+
+Nom de l'hôte
+<input className="mt-1 w-full border rounded p-2" value={hostName} onChange={(e) => setHostName(e.target.value)} placeholder="Ton nom" />
+
+
+<button
+className="px-3 py-2 bg-green-600 text-white rounded"
+onClick={() => onCreate({ hostName })}
+>
+Créer la salle
+
+
+
+
+
+);
+}
+
+
+
+function JoinRoomForm({ onJoin, rooms }) {
+const [code, setCode] = useState("");
+const [group, setGroup] = useState("");
+const [msg, setMsg] = useState("");
+const tryJoin = () => {
+const res = onJoin(code.trim().toUpperCase(), group.trim() || "Groupe");
+if (!res.ok) setMsg(res.message || "Impossible de rejoindre");
+else setMsg(Rejoint ! ID groupe: ${res.groupId});
+};
+return (
+
+
+Code de la salle
+<input className="mt-1 w-full border rounded p-2" value={code} onChange={(e) => setCode(e.target.value)} placeholder="Ex: ABCDEF" />
+Nom du groupe
+<input className="mt-1 w-full border rounded p-2" value={group} onChange={(e) => setGroup(e.target.value)} placeholder="Nom du groupe" />
+
+
+Rejoindre
+
+
+{msg && 
+{msg}
+}
+
+
+);
+}
+
+
+
+function RoomView({ room, isHost, onStartRound, onEndRound, onSubmitGuess, updateRoom }) {
+const [wordForRound, setWordForRound] = useState("");
+const [guessText, setGuessText] = useState("");
+const [activeGroupId, setActiveGroupId] = useState(Object.keys(room.groups)[0] || null);
+
+
+useEffect(() => {
+setActiveGroupId(Object.keys(room.groups)[0] || null);
+}, [room]);
+
+
+return (
+
+
+
+
+
+Salle : {room.code}
+
+
+Hôte : {room.hostName}
+
+
+
+    <div className="mt-4">
+      <h4 className="font-medium">Groupes ({Object.keys(room.groups).length})</h4>
+      <ul className="mt-2 space-y-1">
+        {Object.values(room.groups).map((g) => (
+          <li key={g.id} className="flex justify-between items-center">
+            <div>{g.name}</div>
+            <div className="text-sm text-gray-500">Score: {g.score || 0}</div>
+          </li>
+        ))}
+      </ul>
+    </div>
+
+    {isHost && (
+      <div className="mt-4">
+        <h4 className="font-medium">Démarrer une manche</h4>
+        <label className="block text-sm mt-2">Mot (ou phrase)</label>
+        <input value={wordForRound} onChange={(e) => setWordForRound(e.target.value)} className="mt-1 w-full border rounded p-2" />
+        <div className="mt-3 flex gap-2">
+          <select
+            value={room.settings.gameType}
+            onChange={(e) => {
+              const next = { ...room, settings: { ...room.settings, gameType: e.target.value } };
+              updateRoom(next);
+            }}
+            className="border rounded p-2"
+          >
+            <option value="hangman">Le pendu</option>
+            <option value="anagram">Anagramme</option>
+            <option value="wordsearch">Chasse au mot</option>
+          </select>
+
+          <button className="px-3 py-2 bg-indigo-600 text-white rounded" onClick={() => { if (wordForRound.trim()) onStartRound(room.code, wordForRound.trim()); }}>
+            Démarrer
+          </button>
+
+          <button className="px-3 py-2 bg-red-500 text-white rounded" onClick={() => onEndRound(room.code)}>Terminer</button>
+        </div>
+      </div>
+    )}
+  </div>
+
+  <div className="p-4 border rounded">
+    <h4 className="font-medium">État du jeu</h4>
+    {room.gameState ? (
+      <GamePanel gameState={room.gameState} onGuess={(g) => onSubmitGuess(room.code, activeGroupId, g)} />
+    ) : (
+      <div className="text-sm text-gray-600 mt-2">Aucune manche en cours. L'hôte peut démarrer une manche.</div>
+    )}
+
+    <div className="mt-4">
+      <h5 className="font-medium">Soumettre une proposition (en tant que groupe)</h5>
+      <div className="flex gap-2 mt-2">
+        <select className="border rounded p-2" value={activeGroupId || ""} onChange={(e) => setActiveGroupId(e.target.value)}>
+          {Object.values(room.groups).map((g) => (
+            <option key={g.id} value={g.id}>{g.name}</option>
+          ))}
+        </select>
+        <input className="flex-1 border rounded p-2" placeholder="Lettre ou mot" value={guessText} onChange={(e) => setGuessText(e.target.value)} />
+        <button className="px-3 py-2 bg-green-600 text-white rounded" onClick={() => { if (guessText.trim() && activeGroupId) { onSubmitGuess(room.code, activeGroupId, guessText.trim()); setGuessText(""); } }}>
+          Envoyer
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+
+);
+}
+
+
+function GamePanel({ gameState, onGuess }) {
+if (!gameState) return null;
+if (gameState.type === "hangman") {
+return (
+
+
+
+Le pendu
+
+
+Mot : {gameState.revealed.join(' ')}
+
+
+Erreurs : {gameState.mistakes} / {gameState.maxMistakes}
+
+
+Lettres essayées: {gameState.attempted.join(', ')}
+
+
+
+);
+}
+if (gameState.type === "anagram") {
+return (
+
+
+
+Anagramme
+
+
+Mot mêlé : {gameState.scrambled}
+
+
+Essais: {gameState.attempts ? gameState.attempts.length : 0}
+
+
+
+);
+}
+if (gameState.type === "wordsearch") {
+return (
+
+
+
+Chasse au mot
+
+
+Grille :
+
+
+
+{gameState.grid.flat().map((c, i) => (
+
+{c.toUpperCase()}
+
+))}
+
+
+
+
+);
+}
+return null;
+}
+
+
+
+// End of file
